@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("fails CI so the webhook resumes the linked Codex session again", () => {
-  assert.equal("CI failure", "CI success");
+test("fails CI for a second webhook delivery", () => {
+  assert.equal("CI failure again", "CI success");
 });
