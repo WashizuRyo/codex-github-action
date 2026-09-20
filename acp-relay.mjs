@@ -58,6 +58,19 @@ export async function startAcpRelay({ command, relayDir = defaultRelayDir }) {
         const request = JSON.parse(line);
         const id = `bridge:${randomUUID()}`;
         bridgeRequestIds.add(id);
+        process.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: request.sessionId,
+              update: {
+                sessionUpdate: "user_message_chunk",
+                content: { type: "text", text: request.prompt }
+              }
+            }
+          })}\n`
+        );
         child.stdin.write(
           `${JSON.stringify({
             jsonrpc: "2.0",

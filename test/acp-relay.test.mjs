@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { createAcpResumer } from "../index.mjs";
 
-test("a webhook prompt is sent through the ACP connection that owns the session", async (t) => {
+test("a webhook prompt is shown in the client and sent through the session", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "codex-github-bridge-"));
   await rm(directory, { recursive: true, force: true });
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -48,6 +48,12 @@ test("a webhook prompt is sent through the ACP connection that owns the session"
     { threadId: "thread-27", cwd: "/workspace/menu" },
     "Webhook prompt"
   );
+  const userMessage = await messages.next(
+    (message) =>
+      message.method === "session/update" &&
+      message.params?.update?.sessionUpdate === "user_message_chunk" &&
+      message.params.update.content?.text === "Webhook prompt"
+  );
   const update = await messages.next(
     (message) =>
       message.method === "session/update" &&
@@ -55,6 +61,7 @@ test("a webhook prompt is sent through the ACP connection that owns the session"
   );
 
   assert.deepEqual(result, { status: "accepted" });
+  assert.equal(userMessage.params.sessionId, "thread-27");
   assert.equal(update.params.sessionId, "thread-27");
 });
 
