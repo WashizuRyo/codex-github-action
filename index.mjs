@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -21,11 +21,8 @@ const defaultStateFile = join(
 
 function validSignature(secret, body, signature) {
   if (!secret || !signature) return false;
-  const expected = Buffer.from(
-    `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`
-  );
-  const actual = Buffer.from(signature);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  const expected = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+  return expected === signature;
 }
 
 async function readState(path) {
