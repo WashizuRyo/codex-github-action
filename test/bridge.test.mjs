@@ -228,6 +228,55 @@ test("the same GitHub delivery is processed only once", async (t) => {
   assert.equal(resumeCount, 1);
 });
 
+test("a failed Codex resume leaves the GitHub delivery retryable", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-github-bridge-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const stateFile = join(directory, "state.json");
+  await writeFile(
+    stateFile,
+    JSON.stringify({
+      links: {
+        "WashizuRyo/menu#27": { threadId: "thread-27", cwd: "/workspace/menu" }
+      },
+      deliveries: []
+    })
+  );
+  const body = Buffer.from(
+    JSON.stringify({
+      action: "completed",
+      repository: { full_name: "WashizuRyo/menu" },
+      workflow_run: {
+        id: 1234,
+        conclusion: "failure",
+        html_url: "https://github.com/WashizuRyo/menu/actions/runs/1234",
+        pull_requests: [{ number: 27 }]
+      }
+    })
+  );
+  const secret = "webhook-secret";
+
+  await assert.rejects(
+    handleDelivery(
+      {
+        event: "workflow_run",
+        deliveryId: "delivery-retryable",
+        signature: `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+        body
+      },
+      {
+        secret,
+        stateFile,
+        resumeCodex: async () => {
+          throw new Error("Codex failed");
+        }
+      }
+    ),
+    /Codex failed/
+  );
+
+  assert.deepEqual(JSON.parse(await readFile(stateFile, "utf8")).deliveries, []);
+});
+
 test("link stores the current Codex session for a GitHub pull request", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "codex-github-bridge-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
