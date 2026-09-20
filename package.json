@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "bridge": "./index.mjs"
+    "bridge": "./index.mjs",
+    "bridge-acp-relay": "./acp-relay.mjs"
   },
   "scripts": {
     "start": "node --env-file=.env index.mjs serve",

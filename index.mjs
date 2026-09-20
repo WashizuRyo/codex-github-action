@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { spawn, execFile } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +19,7 @@ const defaultStateFile = join(
   "codex-github-bridge",
   "state.json"
 );
+const defaultRelayDir = join(dirname(defaultStateFile), "relays");
 
 function validSignature(secret, body, signature) {
   if (!secret || !signature) return false;
@@ -101,9 +103,9 @@ export async function handleDelivery(delivery, options) {
   const link = state.links[key];
   if (!link) return { status: "ignored", reason: "PR is not linked" };
 
+  await options.resumeCodex(link, prompt);
   state.deliveries = [...state.deliveries.slice(-99), delivery.deliveryId];
   await writeState(options.stateFile, state);
-  await options.resumeCodex(link, prompt);
   return { status: "processed" };
 }
 
@@ -146,13 +148,49 @@ async function listReviewComments({ repository, pullNumber, reviewId }) {
   return JSON.parse(stdout);
 }
 
-function resumeCodex(codexBin) {
+export function createAcpResumer({ relayDir = defaultRelayDir, timeoutMs = 5000 } = {}) {
   return async (link, prompt) => {
-    const child = spawn(codexBin, ["exec", "resume", link.threadId, prompt], {
-      cwd: link.cwd,
-      stdio: "inherit"
+    let mapping;
+    try {
+      mapping = JSON.parse(
+        await readFile(join(relayDir, `${link.threadId}.json`), "utf8")
+      );
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        throw new Error(`No active ACP relay for Codex session ${link.threadId}`);
+      }
+      throw error;
+    }
+
+    return new Promise((resolve, reject) => {
+      const connection = createConnection(mapping.socketPath);
+      let response = "";
+      const timer = setTimeout(() => {
+        connection.destroy();
+        reject(new Error(`ACP relay timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      connection.setEncoding("utf8");
+      connection.on("connect", () => {
+        connection.end(`${JSON.stringify({ sessionId: link.threadId, prompt })}\n`);
+      });
+      connection.on("data", (chunk) => {
+        response += chunk;
+      });
+      connection.on("end", () => {
+        clearTimeout(timer);
+        try {
+          const result = JSON.parse(response);
+          if (result.error) reject(new Error(result.error));
+          else resolve(result);
+        } catch (error) {
+          reject(new Error(`Invalid ACP relay response: ${error.message}`));
+        }
+      });
+      connection.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
     });
-    child.on("error", (error) => console.error("Failed to start Codex:", error.message));
   };
 }
 
@@ -173,14 +211,12 @@ async function main() {
 
   if (command === "serve") {
     if (!process.env.WEBHOOK_SECRET) throw new Error("WEBHOOK_SECRET is required");
-    const appCodex = "/Applications/ChatGPT.app/Contents/Resources/codex";
-    const codexBin = process.env.CODEX_BIN || (existsSync(appCodex) ? appCodex : "codex");
     const port = Number(process.env.PORT || 8787);
     const server = createWebhookServer({
       secret: process.env.WEBHOOK_SECRET,
       stateFile,
       listReviewComments,
-      resumeCodex: resumeCodex(codexBin),
+      resumeCodex: createAcpResumer(),
       log: console.error
     });
     server.listen(port, "127.0.0.1", () => {

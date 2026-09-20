@@ -17,6 +17,19 @@ openssl rand -hex 32
 
 ## 2. 起動
 
+Zedの `settings.json` でCodexをリレー経由にします。
+
+```json
+"codex-bridge": {
+  "type": "custom",
+  "command": "bridge-acp-relay",
+  "args": ["codex-acp"],
+  "default_config_options": { "mode": "agent-full-access" }
+}
+```
+
+設定後に新しいCodexセッションを開きます。
+
 ```bash
 npm start
 ```
@@ -67,7 +80,6 @@ bridge link https://github.com/OWNER/REPO/pull/123
 | `WEBHOOK_SECRET` | 必須 |
 | `PORT` | `8787` |
 | `BRIDGE_STATE_FILE` | `~/Library/Application Support/codex-github-bridge/state.json` |
-| `CODEX_BIN` | ChatGPT.app同梱Codex、なければPATH上の `codex` |
 
 ## テスト
 
