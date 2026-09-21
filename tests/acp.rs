@@ -143,3 +143,80 @@ async fn relay_removes_its_session_mapping_on_sigterm() {
 
     assert!(!mapping.exists());
 }
+
+#[tokio::test]
+async fn relay_exits_and_removes_mappings_when_client_input_closes() {
+    use std::{process::Stdio, time::Duration};
+    use tokio::process::Command;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut relay = Command::new(env!("CARGO_BIN_EXE_bridge-acp-relay"))
+        .arg("/bin/cat")
+        .env("BRIDGE_RELAY_DIR", directory.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = relay.stdin.take().unwrap();
+    let mut stdout = BufReader::new(relay.stdout.take().unwrap()).lines();
+    stdin
+        .write_all(b"{\"id\":1,\"params\":{\"sessionId\":\"thread-eof\"}}\n")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), stdout.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let mapping = directory.path().join("thread-eof.json");
+    assert!(mapping.exists());
+
+    drop(stdin);
+    tokio::time::timeout(Duration::from_secs(2), relay.wait())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(!mapping.exists());
+}
+
+#[tokio::test]
+async fn relay_publishes_a_session_mapping_only_once() {
+    use std::{process::Stdio, time::Duration};
+    use tokio::process::Command;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut relay = Command::new(env!("CARGO_BIN_EXE_bridge-acp-relay"))
+        .arg("/bin/cat")
+        .env("BRIDGE_RELAY_DIR", directory.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = relay.stdin.take().unwrap();
+    let mut stdout = BufReader::new(relay.stdout.take().unwrap()).lines();
+    let message = b"{\"id\":1,\"params\":{\"sessionId\":\"thread-once\"}}\n";
+    stdin.write_all(message).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), stdout.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let mapping = directory.path().join("thread-once.json");
+    let first_modified = fs::metadata(&mapping).unwrap().modified().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    stdin.write_all(message).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), stdout.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        fs::metadata(mapping).unwrap().modified().unwrap(),
+        first_modified
+    );
+    relay.kill().await.unwrap();
+    relay.wait().await.unwrap();
+}

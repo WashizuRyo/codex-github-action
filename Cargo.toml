@@ -15,6 +15,7 @@ path = "src/bin/bridge-acp-relay.rs"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+fs2 = "0.4"
 hex = "0.4"
 hmac = "0.12"
 serde = { version = "1", features = ["derive"] }

@@ -61,21 +61,21 @@ async fn run() -> Result<()> {
     let bridge_ids = Arc::new(Mutex::new(HashSet::<String>::new()));
     let sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let listener = UnixListener::bind(&socket_path)?;
 
-    let input_task = tokio::spawn(forward_client_input(
+    let mut input_task = tokio::spawn(forward_client_input(
         relay_dir.clone(),
         socket_path.clone(),
         child_stdin.clone(),
         sessions.clone(),
     ));
-    let output_task = tokio::spawn(forward_agent_output(
+    let mut output_task = tokio::spawn(forward_agent_output(
         child_stdout,
         client_stdout.clone(),
         bridge_ids.clone(),
     ));
-    let listener = UnixListener::bind(&socket_path)?;
 
-    loop {
+    let result = loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (connection, _) = accepted?;
@@ -83,20 +83,29 @@ async fn run() -> Result<()> {
                     connection, child_stdin.clone(), client_stdout.clone(), bridge_ids.clone(),
                 ));
             }
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
+            result = &mut input_task => break forwarding_result("client input", result),
+            result = &mut output_task => break forwarding_result("agent output", result),
+            _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = terminate.recv() => break Ok(()),
             status = child.wait() => {
                 status?;
-                break;
+                break Ok(());
             }
         }
-    }
+    };
 
     input_task.abort();
     output_task.abort();
     let _ = child.kill().await;
     cleanup(&relay_dir, &socket_path, &sessions).await;
-    Ok(())
+    result
+}
+
+fn forwarding_result(
+    name: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> Result<()> {
+    result.with_context(|| format!("{name} forwarding task failed"))?
 }
 
 async fn forward_client_input(
@@ -115,14 +124,10 @@ async fn forward_client_input(
             {
                 bail!("Invalid ACP session ID");
             }
-            sessions.lock().await.insert(session_id.to_owned());
-            let mapping = relay_dir.join(format!("{session_id}.json"));
-            fs::write(
-                &mapping,
-                format!("{}\n", json!({ "socketPath": socket_path })),
-            )
-            .await?;
-            set_mode(&mapping, 0o600).await?;
+            let is_new_session = sessions.lock().await.insert(session_id.to_owned());
+            if is_new_session {
+                write_mapping(&relay_dir, session_id, &socket_path).await?;
+            }
         }
         let mut stdin = child_stdin.lock().await;
         stdin.write_all(line.as_bytes()).await?;
@@ -130,6 +135,28 @@ async fn forward_client_input(
         stdin.flush().await?;
     }
     Ok(())
+}
+
+async fn write_mapping(relay_dir: &Path, session_id: &str, socket_path: &Path) -> Result<()> {
+    let mapping = relay_dir.join(format!("{session_id}.json"));
+    let temporary = relay_dir.join(format!(".{session_id}.{}.tmp", Uuid::new_v4()));
+    let result = async {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        let mut file = options.open(&temporary).await?;
+        file.write_all(format!("{}\n", json!({ "socketPath": socket_path })).as_bytes())
+            .await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        fs::rename(&temporary, &mapping).await?;
+        fs::File::open(relay_dir).await?.sync_all().await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary).await;
+    }
+    result
 }
 
 async fn forward_agent_output(

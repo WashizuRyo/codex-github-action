@@ -128,3 +128,25 @@ fn serve_rejects_an_empty_webhook_secret() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("WEBHOOK_SECRET is required"));
 }
+
+#[cfg(unix)]
+#[test]
+fn link_replaces_the_state_file_atomically() {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("state.json");
+    fs::write(&state_file, b"{\"links\":{},\"deliveries\":[]}").unwrap();
+    let original_inode = fs::metadata(&state_file).unwrap().ino();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bridge"))
+        .args(["link", "https://github.com/WashizuRyo/menu/pull/27"])
+        .current_dir(directory.path())
+        .env("CODEX_THREAD_ID", "thread-27")
+        .env("BRIDGE_STATE_FILE", &state_file)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_ne!(fs::metadata(state_file).unwrap().ino(), original_inode);
+}

@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -35,6 +35,12 @@ pub struct State {
     pub links: BTreeMap<String, Link>,
     #[serde(default)]
     pub deliveries: Vec<String>,
+    #[serde(
+        default,
+        rename = "deliveryTimestamps",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub delivery_timestamps: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -152,13 +158,6 @@ pub async fn handle_delivery(
     }
 
     let payload: Value = serde_json::from_slice(&delivery.body)?;
-    let mut state = read_state(state_file)?;
-    if state.deliveries.contains(&delivery.delivery_id) {
-        return Ok(DeliveryResult {
-            status: "ignored",
-            reason: Some("duplicate delivery"),
-        });
-    }
 
     let (pull_number, prompt) = match delivery.event.as_str() {
         "workflow_run"
@@ -221,6 +220,19 @@ pub async fn handle_delivery(
         .as_str()
         .unwrap_or_default();
     let key = format!("{repository}#{pull_number}");
+    let _state_lock = lock_state_async(state_file.to_owned()).await?;
+    let mut state = read_state(state_file)?;
+    let now = unix_timestamp();
+    let state_changed = prune_deliveries(&mut state, now);
+    if state.deliveries.contains(&delivery.delivery_id) {
+        if state_changed {
+            write_state(state_file, &state)?;
+        }
+        return Ok(DeliveryResult {
+            status: "ignored",
+            reason: Some("duplicate delivery"),
+        });
+    }
     let Some(link) = state.links.get(&key) else {
         return Ok(DeliveryResult {
             status: "ignored",
@@ -229,11 +241,8 @@ pub async fn handle_delivery(
     };
 
     actions.resume_codex(link, &prompt).await?;
-    if state.deliveries.len() >= 100 {
-        let remove_count = state.deliveries.len() - 99;
-        state.deliveries.drain(..remove_count);
-    }
-    state.deliveries.push(delivery.delivery_id);
+    state.deliveries.push(delivery.delivery_id.clone());
+    state.delivery_timestamps.insert(delivery.delivery_id, now);
     write_state(state_file, &state)?;
     Ok(DeliveryResult {
         status: "processed",
@@ -336,6 +345,7 @@ pub fn link_pull_request(
     }
 
     let key = format!("{}/{}#{}", segments[0], segments[1], segments[3]);
+    let _state_lock = lock_state(state_file)?;
     let mut state = read_state(state_file)?;
     state.links.insert(
         key.clone(),
@@ -360,21 +370,84 @@ pub fn write_state(path: &Path, state: &State) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut bytes = serde_json::to_vec_pretty(state)?;
     bytes.push(b'\n');
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.json");
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
     let mut options = fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    file.write_all(&bytes)?;
+    let result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+const DELIVERY_RETENTION_SECONDS: u64 = 3 * 24 * 60 * 60;
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn prune_deliveries(state: &mut State, now: u64) -> bool {
+    let original_deliveries = state.deliveries.clone();
+    let original_timestamps = state.delivery_timestamps.clone();
+    state.deliveries.retain(|delivery_id| {
+        state
+            .delivery_timestamps
+            .get(delivery_id)
+            .is_none_or(|timestamp| now.saturating_sub(*timestamp) <= DELIVERY_RETENTION_SECONDS)
+    });
+    state
+        .delivery_timestamps
+        .retain(|delivery_id, _| state.deliveries.contains(delivery_id));
+    for delivery_id in &state.deliveries {
+        state
+            .delivery_timestamps
+            .entry(delivery_id.clone())
+            .or_insert(now);
+    }
+    state.deliveries != original_deliveries || state.delivery_timestamps != original_timestamps
+}
+
+fn lock_state(path: &Path) -> Result<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut lock_name = path.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    Ok(())
+    let lock = options.open(PathBuf::from(lock_name))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+
+async fn lock_state_async(path: PathBuf) -> Result<fs::File> {
+    tokio::task::spawn_blocking(move || lock_state(&path)).await?
 }

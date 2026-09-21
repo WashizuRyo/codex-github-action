@@ -1,6 +1,10 @@
 use std::{
     fs,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -14,6 +18,29 @@ struct RecordingActions {
     reviews: Mutex<Vec<(String, u64, u64)>>,
     has_comments: bool,
     fail_resume: bool,
+}
+
+#[derive(Default)]
+struct SlowActions {
+    resume_count: AtomicUsize,
+}
+
+#[async_trait]
+impl Actions for SlowActions {
+    async fn resume_codex(&self, _link: &Link, _prompt: &str) -> anyhow::Result<()> {
+        self.resume_count.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    }
+
+    async fn review_has_comments(
+        &self,
+        _repository: &str,
+        _pull_number: u64,
+        _review_id: u64,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -278,6 +305,157 @@ async fn the_same_delivery_is_processed_only_once() {
         .unwrap();
         assert_eq!(result.status, expected);
     }
+    assert_eq!(actions.resumed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_copies_of_a_delivery_resume_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("state.json");
+    fs::write(
+        &state_file,
+        serde_json::to_vec(&serde_json::json!({
+            "links": { "WashizuRyo/menu#27": { "threadId": "thread-27", "cwd": "/workspace/menu" } },
+            "deliveries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "action": "completed",
+        "repository": { "full_name": "WashizuRyo/menu" },
+        "workflow_run": {
+            "id": 1234, "conclusion": "failure", "html_url": "https://example.test/run",
+            "pull_requests": [{ "number": 27 }]
+        }
+    }))
+    .unwrap();
+    let secret = "webhook-secret";
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(&body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    let actions = SlowActions::default();
+    let barrier = tokio::sync::Barrier::new(3);
+    let make_delivery = || Delivery {
+        event: "workflow_run".into(),
+        delivery_id: "concurrent-delivery".into(),
+        signature: signature.clone(),
+        body: body.clone(),
+    };
+    let first = async {
+        barrier.wait().await;
+        handle_delivery(make_delivery(), secret, &state_file, &actions).await
+    };
+    let second = async {
+        barrier.wait().await;
+        handle_delivery(make_delivery(), secret, &state_file, &actions).await
+    };
+    let (_, (first, second)) = tokio::join!(barrier.wait(), async { tokio::join!(first, second) });
+    let statuses = [first.unwrap().status, second.unwrap().status];
+
+    assert!(statuses.contains(&"processed"));
+    assert!(statuses.contains(&"ignored"));
+    assert_eq!(actions.resume_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn delivery_ids_are_not_evicted_after_one_hundred_newer_deliveries() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("state.json");
+    let deliveries: Vec<_> = (0..100).map(|index| format!("delivery-{index}")).collect();
+    fs::write(
+        &state_file,
+        serde_json::to_vec(&serde_json::json!({
+            "links": { "WashizuRyo/menu#27": { "threadId": "thread-27", "cwd": "/workspace/menu" } },
+            "deliveries": deliveries
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "action": "completed",
+        "repository": { "full_name": "WashizuRyo/menu" },
+        "workflow_run": {
+            "id": 1234, "conclusion": "failure", "html_url": "https://example.test/run",
+            "pull_requests": [{ "number": 27 }]
+        }
+    }))
+    .unwrap();
+    let secret = "webhook-secret";
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(&body);
+    let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    let actions = RecordingActions::default();
+
+    for (delivery_id, expected) in [("delivery-100", "processed"), ("delivery-0", "ignored")] {
+        let result = handle_delivery(
+            Delivery {
+                event: "workflow_run".into(),
+                delivery_id: delivery_id.into(),
+                signature: signature.clone(),
+                body: body.clone(),
+            },
+            secret,
+            &state_file,
+            &actions,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.status, expected);
+    }
+    assert_eq!(actions.resumed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn delivery_ids_older_than_three_days_are_pruned() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("state.json");
+    let expired = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - (3 * 24 * 60 * 60 + 1);
+    fs::write(
+        &state_file,
+        serde_json::to_vec(&serde_json::json!({
+            "links": { "WashizuRyo/menu#27": { "threadId": "thread-27", "cwd": "/workspace/menu" } },
+            "deliveries": ["expired-delivery"],
+            "deliveryTimestamps": { "expired-delivery": expired }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "action": "completed",
+        "repository": { "full_name": "WashizuRyo/menu" },
+        "workflow_run": {
+            "id": 1234, "conclusion": "failure", "html_url": "https://example.test/run",
+            "pull_requests": [{ "number": 27 }]
+        }
+    }))
+    .unwrap();
+    let secret = "webhook-secret";
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(&body);
+    let actions = RecordingActions::default();
+
+    let result = handle_delivery(
+        Delivery {
+            event: "workflow_run".into(),
+            delivery_id: "expired-delivery".into(),
+            signature: format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+            body,
+        },
+        secret,
+        &state_file,
+        &actions,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.status, "processed");
     assert_eq!(actions.resumed.lock().unwrap().len(), 1);
 }
 
