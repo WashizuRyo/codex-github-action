@@ -5,7 +5,7 @@ GitHub Actionsの失敗とCodeRabbitのインラインレビューを、そのPR
 ## 1. インストール
 
 ```bash
-cargo install --path .
+npm link
 brew install cloudflared
 ```
 
@@ -31,8 +31,7 @@ Zedの `settings.json` でCodexをリレー経由にします。
 設定後に新しいCodexセッションを開きます。
 
 ```bash
-export WEBHOOK_SECRET=<作成したsecret>
-bridge serve
+npm start
 ```
 
 デフォルトでは `127.0.0.1:8787` で待ち受けます。状態は
@@ -43,7 +42,7 @@ bridge serve
 別のターミナルで起動します。Cloudflareアカウントや独自ドメインは不要です。
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8787
+npm run tunnel
 ```
 
 表示された `https://<ランダム文字列>.trycloudflare.com` をコピーします。Quick Tunnelを再起動するとURLが変わるため、その都度GitHub WebhookのPayload URLも更新します。
@@ -81,10 +80,9 @@ bridge link https://github.com/OWNER/REPO/pull/123
 | `WEBHOOK_SECRET` | 必須 |
 | `PORT` | `8787` |
 | `BRIDGE_STATE_FILE` | `~/Library/Application Support/codex-github-bridge/state.json` |
-| `BRIDGE_RELAY_DIR` | `~/Library/Application Support/codex-github-bridge/relays` |
 
 ## テスト
 
 ```bash
-cargo test
+npm test
 ```
