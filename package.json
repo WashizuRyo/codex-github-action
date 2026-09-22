@@ -10,9 +10,16 @@
   "scripts": {
     "start": "node --env-file=.env index.mjs serve",
     "test": "node --test",
-    "tunnel": "cloudflared tunnel --url http://127.0.0.1:8787"
+    "tunnel": "node scripts/wrangler.mjs tunnel",
+    "worker:check": "node scripts/wrangler.mjs check",
+    "worker:deploy": "node scripts/wrangler.mjs deploy",
+    "worker:dev": "node scripts/wrangler.mjs dev",
+    "worker:tail": "node scripts/wrangler.mjs tail"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "wrangler": "^4.136.1"
   }
 }

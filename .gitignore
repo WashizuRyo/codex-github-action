@@ -1,3 +1,5 @@
 .env
+.dev.vars
+.wrangler.generated.jsonc
 .DS_Store
 node_modules/
