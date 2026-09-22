@@ -21,7 +21,8 @@ export async function handleRequest(request, env) {
       message: "forwarding request to local bridge",
       method: request.method,
       path: url.pathname,
-      deliveryId
+      deliveryId,
+      signature: request.headers.get("x-hub-signature-256")
     })
   );
 
