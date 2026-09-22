@@ -73,6 +73,24 @@ test("the Worker rejects all other routes without contacting the bridge", async 
   assert.equal(bridge.requests.length, 0);
 });
 
+test("the Worker rejects paths that only start with an allowed route", async () => {
+  const bridge = createBridge();
+
+  for (const [method, path] of [
+    ["POST", "/github/webhook/extra"],
+    ["GET", "/healthz/debug"]
+  ]) {
+    const response = await handleRequest(
+      new Request(`https://codex-github-bridge.example.workers.dev${path}`, { method }),
+      { BRIDGE: bridge.binding }
+    );
+
+    assert.equal(response.status, 404);
+  }
+
+  assert.equal(bridge.requests.length, 0);
+});
+
 test("the Worker returns 502 when the local bridge is unavailable", async () => {
   const response = await handleRequest(
     new Request("https://codex-github-bridge.example.workers.dev/github/webhook", {

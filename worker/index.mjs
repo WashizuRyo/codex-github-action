@@ -11,7 +11,7 @@ export async function handleRequest(request, env) {
   const url = new URL(request.url);
   const route = `${request.method} ${url.pathname}`;
 
-  if (![...routes].some((allowedRoute) => route.startsWith(allowedRoute))) {
+  if (!routes.has(route)) {
     return jsonResponse({ error: "not found" }, 404);
   }
 
